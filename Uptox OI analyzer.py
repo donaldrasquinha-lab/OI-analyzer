@@ -132,6 +132,98 @@ class UpstoxClient:
         r.raise_for_status()
         return r.json().get("data", [])
 
+    def get_historical_candles(self, instrument_key: str, interval: str = "day", days: int = 30):
+        """Fetch intraday or daily OHLC candles for ADX computation."""
+        from datetime import timedelta
+        to_date = datetime.now().strftime("%Y-%m-%d")
+        from_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+        url = f"{self.BASE}/historical-candle/{instrument_key}/{interval}/{to_date}/{from_date}"
+        r = requests.get(url, headers=self.headers, timeout=10)
+        r.raise_for_status()
+        data = r.json()
+        candles = data.get("data", {}).get("candles", [])
+        # candles: [[timestamp, open, high, low, close, volume, oi], ...]
+        if not candles:
+            return pd.DataFrame()
+        rows = []
+        for c in candles:
+            rows.append({
+                "timestamp": c[0], "open": c[1], "high": c[2],
+                "low": c[3], "close": c[4], "volume": c[5],
+            })
+        cdf = pd.DataFrame(rows).sort_values("timestamp").reset_index(drop=True)
+        return cdf
+
+
+def compute_adx(candles_df: pd.DataFrame, period: int = 14):
+    """
+    Compute ADX, +DI, -DI from OHLC candle data.
+    Uses Wilder's smoothing method.
+    Returns dict with adx, plus_di, minus_di (latest values).
+    """
+    if candles_df.empty or len(candles_df) < period + 2:
+        return None
+
+    df = candles_df.copy()
+    df["prev_high"] = df["high"].shift(1)
+    df["prev_low"] = df["low"].shift(1)
+    df["prev_close"] = df["close"].shift(1)
+
+    # True Range
+    df["tr"] = df.apply(lambda r: max(
+        r["high"] - r["low"],
+        abs(r["high"] - r["prev_close"]) if pd.notna(r["prev_close"]) else 0,
+        abs(r["low"] - r["prev_close"]) if pd.notna(r["prev_close"]) else 0,
+    ), axis=1)
+
+    # Directional Movement
+    df["+dm"] = df.apply(lambda r: max(r["high"] - r["prev_high"], 0)
+                         if pd.notna(r["prev_high"]) and (r["high"] - r["prev_high"]) > (r["prev_low"] - r["low"])
+                         else 0, axis=1)
+    df["-dm"] = df.apply(lambda r: max(r["prev_low"] - r["low"], 0)
+                         if pd.notna(r["prev_low"]) and (r["prev_low"] - r["low"]) > (r["high"] - r["prev_high"])
+                         else 0, axis=1)
+
+    df = df.iloc[1:].reset_index(drop=True)  # drop first row (NaN prev)
+
+    # Wilder's smoothing
+    tr_smooth = [df["tr"].iloc[:period].sum()]
+    pdm_smooth = [df["+dm"].iloc[:period].sum()]
+    ndm_smooth = [df["-dm"].iloc[:period].sum()]
+
+    for i in range(period, len(df)):
+        tr_smooth.append(tr_smooth[-1] - (tr_smooth[-1] / period) + df["tr"].iloc[i])
+        pdm_smooth.append(pdm_smooth[-1] - (pdm_smooth[-1] / period) + df["+dm"].iloc[i])
+        ndm_smooth.append(ndm_smooth[-1] - (ndm_smooth[-1] / period) + df["-dm"].iloc[i])
+
+    # +DI / -DI series
+    plus_di_list = []
+    minus_di_list = []
+    dx_list = []
+
+    for i in range(len(tr_smooth)):
+        tr_val = tr_smooth[i]
+        pdi = (pdm_smooth[i] / tr_val * 100) if tr_val > 0 else 0
+        ndi = (ndm_smooth[i] / tr_val * 100) if tr_val > 0 else 0
+        plus_di_list.append(pdi)
+        minus_di_list.append(ndi)
+        denom = pdi + ndi
+        dx_list.append(abs(pdi - ndi) / denom * 100 if denom > 0 else 0)
+
+    if len(dx_list) < period:
+        return None
+
+    # ADX = Wilder's smooth of DX
+    adx_list = [sum(dx_list[:period]) / period]
+    for i in range(period, len(dx_list)):
+        adx_list.append((adx_list[-1] * (period - 1) + dx_list[i]) / period)
+
+    return {
+        "adx": round(adx_list[-1], 2),
+        "plus_di": round(plus_di_list[-1], 2),
+        "minus_di": round(minus_di_list[-1], 2),
+    }
+
 
 # ── Analysis Engine ──
 def analyze_oi(strikes_df: pd.DataFrame, atm: float, depth: int = 5):
@@ -310,7 +402,7 @@ client = UpstoxClient(token)
 
 @st.cache_data(ttl=25, show_spinner=False)
 def fetch_all_data(_client, instrument_key, expiry, _ts):
-    """Fetches spot price, expiries, and option chain. _ts forces cache refresh."""
+    """Fetches spot price, expiries, option chain, and ADX data. _ts forces cache refresh."""
     spot = _client.get_spot_price(instrument_key)
 
     if not expiry:
@@ -320,7 +412,17 @@ def fetch_all_data(_client, instrument_key, expiry, _ts):
         expiries = _client.get_expiries(instrument_key)
 
     chain = _client.get_option_chain(instrument_key, expiry)
-    return spot, expiries, expiry, chain
+
+    # Fetch historical candles for ADX calculation
+    adx_data = None
+    try:
+        candles = _client.get_historical_candles(instrument_key, interval="day", days=60)
+        if not candles.empty:
+            adx_data = compute_adx(candles, period=14)
+    except Exception:
+        adx_data = None
+
+    return spot, expiries, expiry, chain, adx_data
 
 
 try:
@@ -333,7 +435,7 @@ try:
         ts = time.time()
 
     with st.spinner("Fetching live data from Upstox..."):
-        spot, expiries, used_expiry, chain_data = fetch_all_data(
+        spot, expiries, used_expiry, chain_data, adx_data = fetch_all_data(
             client, idx["key"], stored_expiry, ts
         )
 
@@ -381,7 +483,33 @@ try:
     display_df = df.iloc[trim_start:trim_end].copy()
 
     # ── Top Metrics (custom HTML to avoid truncation) ──
-    now_time = datetime.now().strftime("%H:%M:%S")
+    # ADX values
+    adx_val = adx_data["adx"] if adx_data else "—"
+    pdi_val = adx_data["plus_di"] if adx_data else "—"
+    ndi_val = adx_data["minus_di"] if adx_data else "—"
+
+    # ADX color: strong trend > 25, weak < 20
+    if adx_data:
+        adx_num = adx_data["adx"]
+        adx_color = "#00e676" if adx_num >= 25 else "#ffd740" if adx_num >= 20 else "#64748b"
+        adx_label = "Strong Trend" if adx_num >= 25 else "Moderate" if adx_num >= 20 else "Weak / No Trend"
+        pdi_color = "#22c55e"
+        ndi_color = "#f43f5e"
+        # DI crossover signal
+        if adx_data["plus_di"] > adx_data["minus_di"]:
+            di_signal = "▲ +DI above −DI → Bullish"
+            di_signal_color = "#22c55e"
+        else:
+            di_signal = "▼ −DI above +DI → Bearish"
+            di_signal_color = "#f43f5e"
+    else:
+        adx_color = "#64748b"
+        adx_label = "Unavailable"
+        pdi_color = "#64748b"
+        ndi_color = "#64748b"
+        di_signal = ""
+        di_signal_color = "#64748b"
+
     st.markdown(f"""
     <div style="display:grid; grid-template-columns:repeat(4, 1fr); gap:12px; margin-bottom:16px;">
         <div style="background:#111827; border:1px solid #1e293b; border-radius:12px; padding:16px 20px;">
@@ -396,9 +524,17 @@ try:
             <div style="font-size:11px; color:#64748b; letter-spacing:1.5px; margin-bottom:6px;">EXPIRY</div>
             <div style="font-size:20px; font-weight:700; font-family:'JetBrains Mono',monospace; color:#ffd740;">{used_expiry}</div>
         </div>
-        <div style="background:#111827; border:1px solid #1e293b; border-radius:12px; padding:16px 20px;">
-            <div style="font-size:11px; color:#64748b; letter-spacing:1.5px; margin-bottom:6px;">LAST UPDATED</div>
-            <div style="font-size:24px; font-weight:700; font-family:'JetBrains Mono',monospace; color:#e2e8f0;">{now_time}</div>
+        <div style="background:#111827; border:1px solid {adx_color}44; border-radius:12px; padding:16px 20px;">
+            <div style="font-size:11px; color:#64748b; letter-spacing:1.5px; margin-bottom:6px;">ADX / DI± (14)</div>
+            <div style="display:flex; align-items:baseline; gap:10px;">
+                <div style="font-size:24px; font-weight:700; font-family:'JetBrains Mono',monospace; color:{adx_color};">{adx_val}</div>
+                <div style="font-size:13px; font-family:'JetBrains Mono',monospace;">
+                    <span style="color:{pdi_color};">+{pdi_val}</span>
+                    <span style="color:#334155;"> / </span>
+                    <span style="color:{ndi_color};">−{ndi_val}</span>
+                </div>
+            </div>
+            <div style="font-size:10px; color:{di_signal_color if di_signal else '#64748b'}; margin-top:4px;">{adx_label}{(' · ' + di_signal) if di_signal else ''}</div>
         </div>
     </div>
     """, unsafe_allow_html=True)
