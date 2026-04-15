@@ -265,7 +265,7 @@ with st.sidebar:
     )
 
     auto_refresh = st.toggle("⏱️ Auto-refresh (30s)", value=False)
-    refresh_btn = st.button("🔄 Refresh Now", use_container_width=True, type="primary")
+    refresh_btn = st.button("🔄 Refresh Now", width="stretch", type="primary")
 
     st.markdown("---")
     st.markdown("""
@@ -491,32 +491,93 @@ try:
     </div>
     """, unsafe_allow_html=True)
 
-    # Format table
+    # Build styled HTML table with ATM row highlight
     max_oi = max(display_df["ce_oi"].max(), display_df["pe_oi"].max(), 1)
 
-    table_rows = []
+    headers = ["CE OI", "CE Chg", "CE Vol", "CE LTP", "CE IV%", "★ STRIKE", "PE IV%", "PE LTP", "PE Vol", "PE Chg", "PE OI"]
+    html = """
+    <div style="overflow-x:auto; border:1px solid #1e293b; border-radius:12px;">
+    <table style="width:100%; border-collapse:collapse; font-family:'JetBrains Mono',monospace; font-size:12px;">
+    <thead><tr>"""
+    for h in headers:
+        strike_style = "background:#38bdf811; color:#38bdf8; font-size:13px;" if "STRIKE" in h else ""
+        html += f'<th style="padding:10px 8px; text-align:right; color:#64748b; font-size:10px; letter-spacing:1px; font-weight:600; border-bottom:1px solid #1e293b; background:#111827; {strike_style}">{h}</th>'
+    html += "</tr></thead><tbody>"
+
     for _, r in display_df.iterrows():
         is_atm = r["strike"] == atm
-        atm_marker = " ◄ATM" if is_atm else ""
         ce_chg_sign = "+" if r["ce_oi_chg"] > 0 else ""
         pe_chg_sign = "+" if r["pe_oi_chg"] > 0 else ""
+        ce_chg_color = "#f43f5e" if r["ce_oi_chg"] > 0 else "#22c55e" if r["ce_oi_chg"] < 0 else "#64748b"
+        pe_chg_color = "#22c55e" if r["pe_oi_chg"] > 0 else "#f43f5e" if r["pe_oi_chg"] < 0 else "#64748b"
 
-        table_rows.append({
-            "CE OI": fmt_lakh(r["ce_oi"]),
-            "CE Chg": f"{ce_chg_sign}{fmt_lakh(r['ce_oi_chg'])}",
-            "CE Vol": fmt_lakh(r["ce_volume"]),
-            "CE LTP": f"{r['ce_ltp']:.2f}",
-            "CE IV%": f"{r['ce_iv']:.1f}",
-            "▶ STRIKE": f"{int(r['strike']):,}{atm_marker}",
-            "PE IV%": f"{r['pe_iv']:.1f}",
-            "PE LTP": f"{r['pe_ltp']:.2f}",
-            "PE Vol": fmt_lakh(r["pe_volume"]),
-            "PE Chg": f"{pe_chg_sign}{fmt_lakh(r['pe_oi_chg'])}",
-            "PE OI": fmt_lakh(r["pe_oi"]),
-        })
+        # ATM row styling
+        if is_atm:
+            row_bg = "background: linear-gradient(90deg, #f43f5e11 0%, #38bdf822 50%, #22c55e11 100%);"
+            row_border = "border-top:2px solid #38bdf8; border-bottom:2px solid #38bdf8;"
+        else:
+            row_bg = "background:transparent;"
+            row_border = "border-bottom:1px solid #1e293b33;"
 
-    chain_df = pd.DataFrame(table_rows)
-    st.dataframe(chain_df, use_container_width=True, hide_index=True, height=500)
+        html += f'<tr style="{row_bg} {row_border}">'
+
+        # CE OI with bar
+        ce_pct = min((r["ce_oi"] / max_oi) * 100, 100) if max_oi > 0 else 0
+        html += f'''<td style="padding:8px; text-align:right; color:#e2e8f0;">
+            {fmt_lakh(r["ce_oi"])}
+            <div style="width:100%;height:4px;background:#1e293b;border-radius:2px;margin-top:3px;">
+                <div style="width:{ce_pct}%;height:100%;background:#f43f5e;border-radius:2px;"></div>
+            </div>
+        </td>'''
+
+        # CE Chg
+        html += f'<td style="padding:8px; text-align:right; color:{ce_chg_color};">{ce_chg_sign}{fmt_lakh(r["ce_oi_chg"])}</td>'
+
+        # CE Vol
+        html += f'<td style="padding:8px; text-align:right; color:#94a3b8;">{fmt_lakh(r["ce_volume"])}</td>'
+
+        # CE LTP
+        html += f'<td style="padding:8px; text-align:right; color:#e2e8f0;">{r["ce_ltp"]:.2f}</td>'
+
+        # CE IV
+        html += f'<td style="padding:8px; text-align:right; color:#94a3b8;">{r["ce_iv"]:.1f}%</td>'
+
+        # STRIKE (center column)
+        if is_atm:
+            strike_cell_style = "padding:8px 12px; text-align:center; font-weight:700; font-size:14px; color:#38bdf8; background:#38bdf822; text-shadow:0 0 8px #38bdf844;"
+            atm_badge = '<div style="font-size:8px; letter-spacing:3px; color:#38bdf8; margin-top:2px;">◆ ATM ◆</div>'
+            spot_line = f'<div style="font-size:9px; color:#ffd740; margin-top:1px;">SPOT {spot:,.2f}</div>'
+        else:
+            strike_cell_style = "padding:8px 12px; text-align:center; font-weight:600; font-size:13px; color:#e2e8f0;"
+            atm_badge = ""
+            spot_line = ""
+        html += f'<td style="{strike_cell_style}">{int(r["strike"]):,}{atm_badge}{spot_line}</td>'
+
+        # PE IV
+        html += f'<td style="padding:8px; text-align:right; color:#94a3b8;">{r["pe_iv"]:.1f}%</td>'
+
+        # PE LTP
+        html += f'<td style="padding:8px; text-align:right; color:#e2e8f0;">{r["pe_ltp"]:.2f}</td>'
+
+        # PE Vol
+        html += f'<td style="padding:8px; text-align:right; color:#94a3b8;">{fmt_lakh(r["pe_volume"])}</td>'
+
+        # PE Chg
+        html += f'<td style="padding:8px; text-align:right; color:{pe_chg_color};">{pe_chg_sign}{fmt_lakh(r["pe_oi_chg"])}</td>'
+
+        # PE OI with bar
+        pe_pct = min((r["pe_oi"] / max_oi) * 100, 100) if max_oi > 0 else 0
+        html += f'''<td style="padding:8px; text-align:right; color:#e2e8f0;">
+            {fmt_lakh(r["pe_oi"])}
+            <div style="width:100%;height:4px;background:#1e293b;border-radius:2px;margin-top:3px;">
+                <div style="width:{pe_pct}%;height:100%;background:#22c55e;border-radius:2px;"></div>
+            </div>
+        </td>'''
+
+        html += "</tr>"
+
+    html += "</tbody></table></div>"
+    st.markdown(html, unsafe_allow_html=True)
 
     # ── Visual OI Comparison Chart ──
     st.markdown("---")
