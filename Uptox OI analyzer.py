@@ -380,12 +380,28 @@ try:
     trim_end = min(len(df), atm_pos + 11)
     display_df = df.iloc[trim_start:trim_end].copy()
 
-    # ── Top Metrics ──
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric(f"{selected_index} SPOT", f"₹{spot:,.2f}")
-    c2.metric("ATM STRIKE", f"{atm:,}")
-    c3.metric("EXPIRY", used_expiry)
-    c4.metric("UPDATED", datetime.now().strftime("%H:%M:%S"))
+    # ── Top Metrics (custom HTML to avoid truncation) ──
+    now_time = datetime.now().strftime("%H:%M:%S")
+    st.markdown(f"""
+    <div style="display:grid; grid-template-columns:repeat(4, 1fr); gap:12px; margin-bottom:16px;">
+        <div style="background:#111827; border:1px solid #1e293b; border-radius:12px; padding:16px 20px;">
+            <div style="font-size:11px; color:#64748b; letter-spacing:1.5px; margin-bottom:6px;">{selected_index} SPOT</div>
+            <div style="font-size:24px; font-weight:700; font-family:'JetBrains Mono',monospace; color:#38bdf8;">₹{spot:,.2f}</div>
+        </div>
+        <div style="background:#111827; border:1px solid #1e293b; border-radius:12px; padding:16px 20px;">
+            <div style="font-size:11px; color:#64748b; letter-spacing:1.5px; margin-bottom:6px;">ATM STRIKE</div>
+            <div style="font-size:24px; font-weight:700; font-family:'JetBrains Mono',monospace; color:#e2e8f0;">{atm:,}</div>
+        </div>
+        <div style="background:#111827; border:1px solid #1e293b; border-radius:12px; padding:16px 20px;">
+            <div style="font-size:11px; color:#64748b; letter-spacing:1.5px; margin-bottom:6px;">EXPIRY</div>
+            <div style="font-size:20px; font-weight:700; font-family:'JetBrains Mono',monospace; color:#ffd740;">{used_expiry}</div>
+        </div>
+        <div style="background:#111827; border:1px solid #1e293b; border-radius:12px; padding:16px 20px;">
+            <div style="font-size:11px; color:#64748b; letter-spacing:1.5px; margin-bottom:6px;">LAST UPDATED</div>
+            <div style="font-size:24px; font-weight:700; font-family:'JetBrains Mono',monospace; color:#e2e8f0;">{now_time}</div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
 
     # ── Analysis ──
     result = analyze_oi(df, atm, analysis_depth)
